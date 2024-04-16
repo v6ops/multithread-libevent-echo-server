@@ -154,6 +154,61 @@ static void closeAndFreeClient(client_t *client) {
     }
 }
 
+
+
+#ifdef WITH_SSL
+int do_libevent_write(client_t *p_client) {
+  int nbytesout;
+  struct ssl_client *p_ssl_client;
+  p_ssl_client=p_client->p_ssl_client;
+  /* Copy any encrypted bytes from the SSL write buffer               */
+  /* to the libevent write buffer.                                    */
+  /* Replaces direct write to the socket in do_sock_write().          */
+  nbytesout=p_ssl_client->write_len;
+  if (nbytesout >0) {
+    evbuffer_add(p_client->output_buffer, p_ssl_client->write_buf, nbytesout);
+    // remove from the write_buf and shift memory
+    memmove(p_ssl_client->write_buf, p_ssl_client->write_buf+nbytesout, p_ssl_client->write_len-nbytesout);
+    p_ssl_client->write_len -= nbytesout;
+    p_ssl_client->write_buf = (char*)realloc(p_ssl_client->write_buf, p_ssl_client->write_len);
+    return nbytesout;
+  }
+  return 0;
+}
+#endif //WITH_SSL
+
+#ifdef WITH_SSL
+void do_libevent_echo(struct ssl_client *p_ssl_client,char *buf, size_t len) {
+  printf("Echo: %.*s\n", (int)len, buf);
+  char output[DEFAULT_BUF_SIZE];
+  size_t nbytes,offset,output_len;
+  offset=0;
+  output_len=0;
+  while (len>0) {
+    output_len=0;
+    memset(output,0,DEFAULT_BUF_SIZE);
+    nbytes=len;
+    if (nbytes > (DEFAULT_BUF_SIZE -9)) nbytes = DEFAULT_BUF_SIZE-9;
+    //printf("len: %i offset %i nbytes %i\n", (int)len, (int)offset, (int)nbytes);
+    // this is where the action code goes
+    memcpy(output,"Echo: ",6); // echo the input to the output
+    output_len+=6;
+    memcpy(output+output_len,buf+offset,nbytes); // echo the input to the output
+    output_len+=nbytes;
+    memset(output+output_len,13,1); // add a cr to the output
+    output_len++;
+    memset(output+output_len,10,1); // add a lf to the output
+    output_len++;
+    //printf("do_libevent_output: %.*s\n", (int)output_len, output);
+    // send bytes to be encrypted
+    send_unencrypted_bytes(p_ssl_client, output, output_len);
+    len -= nbytes;
+    offset += nbytes;
+  }
+}
+#endif //WITH_SSL
+
+
 /**
  * Called by libevent when there is data to read.
  */
@@ -161,40 +216,34 @@ void buffered_on_read(struct bufferevent *bev, void *arg) {
     client_t *client = (client_t *)arg;
     char data[4096];
     int nbytesin;
-    int nbytesout;
 
     /* Copy the data from the input buffer to the output buffer in 4096-byte chunks.
      * There is a one-liner to do the whole thing in one shot, but the purpose of this server
      * is to show actual real-world reading and writing of the input and output buffers,
      * so we won't take that shortcut here. */
     while ((nbytesin = EVBUFFER_LENGTH(bev->input)) > 0) {
-        /* Remove a chunk of data from the input buffer, copying it into our local array (data). */
-        if (nbytesin > 4096) nbytesin = 4096;
+      /* Remove a chunk of data from the input buffer, copying it into our local array (data). */
+      if (nbytesin > 4096) nbytesin = 4096;
         evbuffer_remove(bev->input, data, nbytesin); 
 #ifdef WITH_SSL
-        // call the ssl callback to process inbound data
-	// buffered_on_read replaces the direct socket read of do_sock_read
+        // call the ssl callback to process inbound data.
+        // buffered_on_read replaces the direct socket read of do_sock_read
+	// that would normally feed ssl input.
         print_ssl_state(client->p_ssl_client);
+	// on_read_cb ssl in turn calls our callback set in io_on_read()
         on_read_cb(client->p_ssl_client, data, (size_t)nbytesin);
-
-        /* Copy any encrypted bytes from the SSL write buffer               */
-	/* to the libevent write buffer.                                    */
-        /* Replaces direct write to the socket in do_sock_write().          */
-	nbytesout=client->p_ssl_client->write_len;
-	if (nbytesout >0) {
-          evbuffer_add(client->output_buffer, client->p_ssl_client->write_buf, nbytesout);
-	  // remove from the write_buf and shift memory
-          memmove(client->p_ssl_client->write_buf, client->p_ssl_client->write_buf+nbytesout, client->p_ssl_client->write_len-nbytesout);
-          client->p_ssl_client->write_len -= nbytesout;
-          client->p_ssl_client->write_buf = (char*)realloc(client->p_ssl_client->write_buf, client->p_ssl_client->write_len);
-  }
+    }
+    // do the encryption for all returned data
+    do_encrypt(client->p_ssl_client);
+    // Copy any encrypted bytes from the SSL write buf to libevent output buf
+    do_libevent_write(client);
 #else
 	// original echo function
         printf("client [%d]: %s", client->fd, data);
         /* Add the chunk of data from our local array (data) to the client's output buffer. */
         evbuffer_add(client->output_buffer, data, nbytesin);
-#endif // WITH_SSL
     }
+#endif // WITH_SSL
 
     /* Send the results to the client. 
      * This actually only queues the results for sending.
@@ -320,7 +369,10 @@ void on_accept(int fd, short ev, void *arg) {
     /* callback to process the unencrypted data from ssl on every read */
     /* points the real work function where inbound data is processed   */
     /* over-write the one provided with our own                        */
-    //client->p_ssl_client->io_on_read = print_unencrypted_data;
+    client->p_ssl_client->io_on_read = do_libevent_echo;
+    // the ssl callback needs a pointer back to the client
+    // due to use of 2 independent structs for libevent and ssl
+    //client->p_ssl_client->p_client = client;
 #endif // WITH_SSL
 
     /**
