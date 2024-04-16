@@ -54,6 +54,10 @@ void die(const char *msg) {
 void print_unencrypted_data(char *buf, size_t len) {
   printf("%.*s", (int)len, buf);
 }
+#ifdef WITH_SSL
+// predefine for circular ref
+//typedef struct client client_t;
+#endif //WITH_SSL
 
 /* An instance of this object is created each time a client connection is
  * accepted. It stores the client file descriptor, the SSL objects, and data
@@ -81,7 +85,12 @@ struct ssl_client
   const char * last_state;
 
   /* Method to invoke when unencrypted bytes are available. */
+#ifdef WITH_SSL
+  void (*io_on_read)(struct ssl_client *p, char *buf, size_t len);
+  //client_t *p_client;
+#else
   void (*io_on_read)(char *buf, size_t len);
+#endif
 } client;
 
 /* This enum contols whether the SSL connection needs to initiate the SSL
@@ -112,7 +121,9 @@ void ssl_client_init(struct ssl_client *p,
   SSL_set_bio(p->ssl, p->rbio, p->wbio);
 
   /* callback to print the unencrypted data from ssl to STDOUT on every read */
+#ifndef WITH_SSL
   p->io_on_read = print_unencrypted_data;
+#endif
 }
 
 
@@ -156,7 +167,12 @@ static enum sslstatus get_sslstatus(SSL* ssl, int n)
  * object. */
 void send_unencrypted_bytes(struct ssl_client *p, const char *buf, size_t len)
 {
-  p->encrypt_buf = (char*)realloc(p->encrypt_buf, p->encrypt_len + len);
+  char *p_tmp;
+  p_tmp = (char*)realloc(p->encrypt_buf, p->encrypt_len + len);
+  if (p_tmp == NULL){
+    die ("Failed to allocate space for p_dm_query->query query packet\n");
+  }
+  p->encrypt_buf=p_tmp;
   memcpy(p->encrypt_buf+p->encrypt_len, buf, len);
   p->encrypt_len += len;
 }
@@ -248,7 +264,11 @@ int on_read_cb(struct ssl_client *p, char* src, size_t len)
     do {
       n = SSL_read(p->ssl, buf, sizeof(buf));
       if (n > 0)
+#ifdef WITH_SSL
+        p->io_on_read(p,buf, (size_t)n);
+#else
         p->io_on_read(buf, (size_t)n);
+#endif
     } while (n > 0);
 
     status = get_sslstatus(p->ssl, n);
