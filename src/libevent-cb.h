@@ -310,7 +310,11 @@ static void server_job_function(struct job *job) {
  */
 void on_accept(int fd, short ev, void *arg) {
     int client_fd;
+#ifdef WITH_IPv6
+    struct sockaddr_in6 client_addr;
+#else
     struct sockaddr_in client_addr;
+#endif
     socklen_t client_len = sizeof(client_addr);
     workqueue_t *workqueue = (workqueue_t *)arg;
     client_t *client;
@@ -338,7 +342,13 @@ void on_accept(int fd, short ev, void *arg) {
     memset(client, 0, sizeof(*client));
     client->fd = client_fd;
 
+#ifdef WITH_IPv6
+    char human_addr[INET6_ADDRSTRLEN];
+    inet_ntop(AF_INET6,&(client_addr.sin6_addr),human_addr,INET6_ADDRSTRLEN);
+    printf("client [%d]: accepted connection from %s.\n", client_fd,human_addr);
+#else
     printf("client [%d]: accepted connection from %s.\n", client_fd,inet_ntoa(client_addr.sin_addr));
+#endif
 
     client->cb_read_count = 0;
     /**
@@ -431,7 +441,11 @@ void on_accept(int fd, short ev, void *arg) {
  */
 int runServer(int port) {
     int listenfd;
+#ifdef WITH_IPv6
+    struct sockaddr_in6 listen_addr;
+#else
     struct sockaddr_in listen_addr;
+#endif
     struct event ev_accept;
     int reuseaddr_on;
 
@@ -456,6 +470,16 @@ int runServer(int port) {
     sigaction(SIGTERM, &siginfo, NULL);
 
     /* Create our listening socket. */
+#ifdef WITH_IPv6
+    listenfd = socket(AF_INET6, SOCK_STREAM, 0);
+    if (listenfd < 0) {
+        err(1, "listen failed");
+    }
+    memset(&listen_addr, 0, sizeof(listen_addr));
+    listen_addr.sin6_family = AF_INET6;
+    listen_addr.sin6_addr = in6addr_any;
+    listen_addr.sin6_port = htons(port);
+#else
     listenfd = socket(AF_INET, SOCK_STREAM, 0);
     if (listenfd < 0) {
         err(1, "listen failed");
@@ -464,6 +488,7 @@ int runServer(int port) {
     listen_addr.sin_family = AF_INET;
     listen_addr.sin_addr.s_addr = INADDR_ANY;
     listen_addr.sin_port = htons(port);
+#endif
     if (bind(listenfd, (struct sockaddr *)&listen_addr, sizeof(listen_addr)) < 0) {
         err(1, "bind failed");
     }
